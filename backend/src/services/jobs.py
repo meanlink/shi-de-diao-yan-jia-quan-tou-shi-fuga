@@ -1,11 +1,10 @@
-import time
 from fastapi import HTTPException
-from redis import Redis
-from src.config.settings import REDIS_URL
-from src.models import Dataset, Job
+from src.models import Dataset
 from src.services.business import metadata
+from src.services import computations
 def create(db, data, user):
-    if not db.get(Dataset,data.dataset_id): raise HTTPException(404,'数据批次不存在')
+    dataset = db.get(Dataset, data.dataset_id)
+    if not dataset: raise HTTPException(404, '数据批次不存在')
     allowed={p['key']:p for p in metadata().get('parameters',[])}
     if set(data.params)-set(allowed): raise HTTPException(422,'包含未知分析参数')
     params={k:p['default'] for k,p in allowed.items()}
@@ -20,11 +19,9 @@ def create(db, data, user):
             except (ValueError,TypeError): raise HTTPException(422, f'{p["label"]} 超出范围或非数值')
         elif str(v) not in [str(o['value']) for o in p.get('options',[])]:
             raise HTTPException(422,f'{p["label"]} 不是有效选项')
-    j=Job(name=data.name, dataset_id=data.dataset_id, params=params, created_by=user.id, created_at=time.time(), status='queued')
-    db.add(j); db.flush()
-    return j
-def enqueue(job_id):
-    try:
-        r=Redis.from_url(REDIS_URL); r.rpush('analysis:queue',job_id); r.close()
-    except Exception:
-        pass # SQL queued status is the durable fallback
+    name=data.name.strip()
+    if len(name)<2: raise HTTPException(422,'任务名称至少需要两个字符')
+    # 样本内容、参数、计算规则版本相同则合用同一份共享计算（行序无关）
+    job, should_enqueue, generation = computations.join(db, dataset, params, name, user)
+    db.flush()
+    return job, should_enqueue, generation, job.computation_id
